@@ -837,58 +837,97 @@ function nextSpeak() {
 }
 
 function doSpeak(text, langOut) {
+  if (!text || !text.trim()) { spkBusy = false; return; }
   var SS = window.speechSynthesis;
-  if (!SS) { spkBusy = false; nextSpeak(); return; }
-
-  SS.cancel();
+  if (!SS) { spkBusy = false; return; }
 
   var ttsLang = TTS[langOut] || langOut;
 
+  // Cancel anything currently speaking
+  SS.cancel();
+
   function trySpeak(attempt) {
     var voices = SS.getVoices();
-
-    // Pick best voice
     var v = voices.find(function(x){ return x.lang === ttsLang; }) ||
             voices.find(function(x){ return x.lang.startsWith(ttsLang.split('-')[0]); }) ||
             voices.find(function(x){ return x.lang.startsWith('en'); });
 
-    // No voices loaded yet — retry up to 5 times
-    if (!v && attempt < 5) {
-      setTimeout(function(){ trySpeak(attempt + 1); }, 300);
+    if (voices.length === 0 && attempt < 8) {
+      setTimeout(function(){ trySpeak(attempt+1); }, 250);
       return;
     }
 
     var u = new SpeechSynthesisUtterance(text);
     if (v) { u.voice = v; u.lang = v.lang; }
     else   { u.lang = ttsLang; }
-    u.rate   = 1;
-    u.pitch  = 1;
-    u.volume = 1;
+    u.rate = 0.95; u.pitch = 1; u.volume = 1;
 
-    u.onstart = function() {
-      ss('🔊 Speaking…', 'ok');
-    };
-    u.onend = function() {
+    var done = false;
+    function onDone() {
+      if (done) return; done = true;
       spkBusy = false;
       ss('✅ Done', 'ok');
-      nextSpeak();
-    };
-    u.onerror = function(e) {
-      spkBusy = false;
-      if (e.error !== 'interrupted' && e.error !== 'canceled') {
-        ss('⚠️ Voice error: ' + e.error, 'wrn');
-      }
-      nextSpeak();
+    }
+
+    u.onstart = function(){ ss('🔊 Speaking…','ok'); };
+    u.onend   = onDone;
+    u.onerror = function(e){
+      if (e.error === 'interrupted' || e.error === 'canceled') { onDone(); return; }
+      // Try MyMemory TTS audio fallback
+      ss('⚠️ Browser TTS failed — using audio fallback…','wrn');
+      playAudioFallback(text, ttsLang, onDone);
     };
 
-    // Chrome fix: cancel, small pause, then speak
     SS.cancel();
-    setTimeout(function() {
-      try { SS.speak(u); } catch(err) { spkBusy = false; nextSpeak(); }
-    }, 50);
+    setTimeout(function(){
+      try { SS.speak(u); } catch(err) {
+        playAudioFallback(text, ttsLang, onDone);
+      }
+    }, 80);
   }
 
   trySpeak(0);
+}
+
+// Audio fallback — Google Translate TTS (bypasses speechSynthesis entirely)
+function playAudioFallback(text, lang, onDone) {
+  try {
+    var baseLang = (lang || 'en').split('-')[0];
+    // Chunk text to max 200 chars (Google TTS limit)
+    var chunk = text.length > 200 ? text.substring(0, 200) : text;
+    // Use Google Translate TTS endpoint (free, no key needed)
+    var url = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' +
+      encodeURIComponent(chunk) +
+      '&tl=' + baseLang +
+      '&total=1&idx=0&textlen=' + chunk.length +
+      '&client=tw-ob';
+
+    var audio = new Audio();
+    audio.src = url;
+    audio.volume = 1.0;
+
+    audio.onended = function() {
+      ss('✅ Done', 'ok');
+      if (onDone) onDone();
+    };
+    audio.onerror = function() {
+      // Google TTS blocked — show message
+      ss('⚠️ Auto-voice blocked. See translated text above.', 'wrn');
+      if (onDone) onDone();
+    };
+    audio.oncanplaythrough = function() {
+      audio.play().catch(function() {
+        ss('⚠️ Audio blocked by browser. Tap 🔊 button.', 'wrn');
+        if (onDone) onDone();
+      });
+    };
+
+    ss('🔊 Loading audio…', 'ok');
+    audio.load();
+  } catch(e) {
+    ss('⚠️ Voice unavailable — text shown above', 'wrn');
+    if (onDone) onDone();
+  }
 }
 
 // Keep Chrome speechSynthesis alive (it silently pauses after ~15s)
