@@ -814,110 +814,121 @@ async function doTranslate(text,from,to){
 // ═══════════════════════════════════════
 //  SPEAK — with optional device routing
 // ═══════════════════════════════════════
-// ── Audio unlock (Chrome blocks TTS until user interacts with an AudioContext)
-var audioUnlocked = false;
-function unlockAudio() {
-  if (audioUnlocked) return;
-  try {
-    var ctx = new (window.AudioContext || window.webkitAudioContext)();
-    var buf = ctx.createBuffer(1, 1, 22050);
-    var src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    src.start(0);
-    ctx.resume().then(function(){ audioUnlocked = true; ctx.close(); });
-  } catch(e) {}
+// ═══════════════════════════════════════
+//  SPEAK ENGINE — works reliably in Chrome
+// ═══════════════════════════════════════
+
+// Global speak queue
+var spkQueue = [];
+var spkBusy  = false;
+
+// Called from user gesture OR after translate
+function queueSpeak(text, langOut) {
+  if (!text || !text.trim()) return;
+  spkQueue.push({ text: text, langOut: langOut });
+  if (!spkBusy) nextSpeak();
 }
-// Unlock on first any touch/click on the page
-document.addEventListener('click', unlockAudio, { once: false });
-document.addEventListener('touchstart', unlockAudio, { once: false });
 
-function speakText(text, langOut, deviceId) {
-  if (!window.speechSynthesis || !text) return;
+function nextSpeak() {
+  if (spkQueue.length === 0) { spkBusy = false; return; }
+  spkBusy = true;
+  var item = spkQueue.shift();
+  doSpeak(item.text, item.langOut);
+}
 
-  // Cancel any ongoing speech
-  window.speechSynthesis.cancel();
-  isSpeaking = true;
+function doSpeak(text, langOut) {
+  var SS = window.speechSynthesis;
+  if (!SS) { spkBusy = false; nextSpeak(); return; }
+
+  SS.cancel();
 
   var ttsLang = TTS[langOut] || langOut;
-  var baseLang = ttsLang.split('-')[0];
 
-  function doSpeak() {
-    var vs = window.speechSynthesis.getVoices();
+  function trySpeak(attempt) {
+    var voices = SS.getVoices();
 
-    // Find best matching voice
-    var voice = vs.find(function(v){ return v.lang === ttsLang; }) ||
-                vs.find(function(v){ return v.lang.startsWith(baseLang); }) ||
-                vs.find(function(v){ return v.lang.startsWith('en'); }); // fallback to English
+    // Pick best voice
+    var v = voices.find(function(x){ return x.lang === ttsLang; }) ||
+            voices.find(function(x){ return x.lang.startsWith(ttsLang.split('-')[0]); }) ||
+            voices.find(function(x){ return x.lang.startsWith('en'); });
 
-    if (!voice || vs.length === 0) {
-      // Voices not loaded yet — retry after short delay
-      setTimeout(doSpeak, 250);
+    // No voices loaded yet — retry up to 5 times
+    if (!v && attempt < 5) {
+      setTimeout(function(){ trySpeak(attempt + 1); }, 300);
       return;
     }
 
     var u = new SpeechSynthesisUtterance(text);
-    u.voice  = voice;
-    u.lang   = voice.lang;
+    if (v) { u.voice = v; u.lang = v.lang; }
+    else   { u.lang = ttsLang; }
     u.rate   = 1;
     u.pitch  = 1;
     u.volume = 1;
 
     u.onstart = function() {
-      isSpeaking = true;
       ss('🔊 Speaking…', 'ok');
     };
     u.onend = function() {
-      isSpeaking = false;
+      spkBusy = false;
       ss('✅ Done', 'ok');
-      processQueue();
+      nextSpeak();
     };
     u.onerror = function(e) {
-      isSpeaking = false;
-      if (e.error === 'interrupted') return;
-      // On error, retry once after short delay
-      setTimeout(function(){
-        var u2 = new SpeechSynthesisUtterance(text);
-        u2.lang = ttsLang; u2.rate = 1; u2.volume = 1;
-        u2.onend = function(){ isSpeaking = false; };
-        u2.onerror = function(){ isSpeaking = false; };
-        window.speechSynthesis.speak(u2);
-      }, 300);
+      spkBusy = false;
+      if (e.error !== 'interrupted' && e.error !== 'canceled') {
+        ss('⚠️ Voice error: ' + e.error, 'wrn');
+      }
+      nextSpeak();
     };
 
-    // Chrome TTS bug fix: cancel + tiny delay before speaking
-    window.speechSynthesis.cancel();
-    setTimeout(function(){
-      window.speechSynthesis.speak(u);
-    }, 100);
-
-    // VB-Cable: also route to selected device if setSinkId supported
-    if (deviceId && deviceId !== 'default' && 'setSinkId' in HTMLAudioElement.prototype) {
-      routeToDevice(text, ttsLang, deviceId);
-    }
+    // Chrome fix: cancel, small pause, then speak
+    SS.cancel();
+    setTimeout(function() {
+      try { SS.speak(u); } catch(err) { spkBusy = false; nextSpeak(); }
+    }, 50);
   }
 
-  // If voices not loaded yet wait for them
-  var vs = window.speechSynthesis.getVoices();
-  if (vs && vs.length > 0) {
-    doSpeak();
-  } else {
-    window.speechSynthesis.onvoiceschanged = function() { doSpeak(); };
-    // Also try after 500ms in case onvoiceschanged doesn't fire
-    setTimeout(doSpeak, 500);
-  }
+  trySpeak(0);
 }
 
-// Route audio to specific output device (VB-Cable)
-function routeToDevice(text, ttsLang, deviceId) {
-  try {
-    var audio = new Audio();
-    audio.setSinkId(deviceId).then(function() {
-      var u = new SpeechSynthesisUtterance(text);
-      u.lang = ttsLang; u.rate = 1; u.volume = 1;
-      window.speechSynthesis.speak(u);
-    }).catch(function(e){ console.warn('setSinkId failed:', e); });
-  } catch(e) { console.warn('VB-Cable routing error:', e); }
+// Keep Chrome speechSynthesis alive (it silently pauses after ~15s)
+setInterval(function() {
+  if (window.speechSynthesis && !window.speechSynthesis.speaking) {
+    window.speechSynthesis.resume();
+  }
+}, 5000);
+
+// Speak button shown after translation (guaranteed user gesture)
+function showSpeakBtn(person, text, langOut) {
+  var box = document.getElementById('box' + person);
+  var old = box.querySelector('.speak-btn');
+  if (old) old.remove();
+
+  var btn = document.createElement('button');
+  btn.className = 'speak-btn';
+  btn.innerHTML = '🔊 Tap to Hear';
+  btn.style.cssText = [
+    'display:block;width:100%;margin-top:6px;padding:11px 14px',
+    'border-radius:10px;border:1px solid #00c8ff',
+    'background:rgba(0,200,255,0.12);color:#00c8ff',
+    'font-size:13px;font-weight:700;cursor:pointer',
+    'letter-spacing:0.5px;-webkit-tap-highlight-color:transparent',
+    'transition:all 0.2s'
+  ].join(';');
+
+  btn.addEventListener('click', function() {
+    btn.innerHTML = '🔊 Speaking…';
+    btn.style.borderColor = '#00ff9d';
+    btn.style.color = '#00ff9d';
+    btn.style.background = 'rgba(0,255,157,0.1)';
+    // Direct user gesture — speak immediately
+    spkQueue = []; spkBusy = false;
+    doSpeak(text, langOut);
+    setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 5000);
+  });
+
+  box.appendChild(btn);
+  box.scrollTop = box.scrollHeight;
 }
 
 // ═══════════════════════════════════════
@@ -983,7 +994,7 @@ function startRec(p){
       addBubble(p,trans,'trans');
       addHist(p,final,trans,st[other].lang);
       showSpeakBtn(other,trans,st[other].lang.out);
-      speakQueued(trans,st[other].lang.out);
+      queueSpeak(trans,st[other].lang.out);
     }
   };
   s.rec.onerror=function(e){
@@ -1078,8 +1089,9 @@ function startCallRec(){
       var trans=await doTranslate(final,callSt.lang.out,callSt.outLang.out);
       document.getElementById('callTrans').textContent=trans;
       addHist('Call',final,trans,callSt.outLang);
-      document.getElementById('callTrans').innerHTML=esc(trans)+'<br><button onclick="speakQueued('+JSON.stringify(trans)+',''+callSt.outLang.out+'')"+style="margin-top:8px;padding:6px 16px;border-radius:8px;border:1px solid #00c8ff;background:rgba(0,200,255,0.1);color:#00c8ff;font-size:12px;cursor:pointer;">🔊 Tap to Hear</button>';
-      speakQueued(trans,callSt.outLang.out);
+      document.getElementById('callTrans').textContent=trans;
+      showCallSpeakBtn(trans,callSt.outLang.out);
+      queueSpeak(trans,callSt.outLang.out);
     }
   };
   callSt.rec.onerror=function(e){
@@ -1174,6 +1186,7 @@ function clearAll(){
   document.getElementById('callTrans').innerHTML='<span class="mini-ph">Translation…</span>';
   history=[];
   window.speechSynthesis&&window.speechSynthesis.cancel();
+  spkQueue=[];spkBusy=false;
   isSpeaking=false;
   ss('Cleared — ready','');
 }
@@ -1184,49 +1197,28 @@ function clearAll(){
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 
-// ═══════════════════════════════════════
-//  SPEAK QUEUE — bypasses Chrome autoplay block
-// ═══════════════════════════════════════
-var speakQueue = [];
-var isProcessingQueue = false;
 
-function speakQueued(text, langOut) {
-  speakQueue.push({text:text, langOut:langOut});
-  if (!isProcessingQueue) processQueue();
-}
-
-function processQueue() {
-  if (speakQueue.length === 0) { isProcessingQueue = false; return; }
-  isProcessingQueue = true;
-  var item = speakQueue.shift();
-  speakText(item.text, item.langOut, 'default');
-}
-
-// Show a tap-to-hear button in the speech box as fallback
-function showSpeakBtn(person, text, langOut) {
-  var box = document.getElementById('box' + person);
-  // Remove any existing speak button
+function showCallSpeakBtn(text, langOut) {
+  var box = document.getElementById('callTrans');
   var old = box.querySelector('.speak-btn');
   if (old) old.remove();
-  // Create button
   var btn = document.createElement('button');
   btn.className = 'speak-btn';
-  btn.textContent = '🔊 Tap to Hear Translation';
-  btn.style.cssText = 'width:100%;margin-top:6px;padding:10px;border-radius:10px;' +
-    'border:1px solid #00c8ff;background:rgba(0,200,255,0.1);' +
-    'color:#00c8ff;font-size:13px;font-weight:600;cursor:pointer;' +
-    'letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;';
-  btn.onclick = function() {
-    btn.textContent = '🔊 Speaking…';
-    btn.style.background = 'rgba(0,255,157,0.1)';
-    btn.style.borderColor = '#00ff9d';
-    btn.style.color = '#00ff9d';
-    speakText(text, langOut, 'default');
-    setTimeout(function(){ btn.remove(); }, 4000);
-  };
+  btn.innerHTML = '🔊 Tap to Hear';
+  btn.style.cssText = [
+    'display:block;width:100%;margin-top:8px;padding:11px',
+    'border-radius:10px;border:1px solid #00c8ff',
+    'background:rgba(0,200,255,0.12);color:#00c8ff',
+    'font-size:13px;font-weight:700;cursor:pointer',
+    '-webkit-tap-highlight-color:transparent'
+  ].join(';');
+  btn.addEventListener('click', function(){
+    btn.innerHTML = '🔊 Speaking…';
+    spkQueue=[]; spkBusy=false;
+    doSpeak(text, langOut);
+    setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 5000);
+  });
   box.appendChild(btn);
-  box.scrollTop = box.scrollHeight;
-  ss('✅ Translation ready — tap 🔊 button to hear it', 'ok');
 }
 
 // ═══════════════════════════════════════
