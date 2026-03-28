@@ -870,6 +870,7 @@ function speakText(text, langOut, deviceId) {
     u.onend = function() {
       isSpeaking = false;
       ss('✅ Done', 'ok');
+      processQueue();
     };
     u.onerror = function(e) {
       isSpeaking = false;
@@ -981,17 +982,8 @@ function startRec(p){
       var trans=await doTranslate(final,s.lang.out,st[other].lang.out);
       addBubble(p,trans,'trans');
       addHist(p,final,trans,st[other].lang);
-      ss('🔊 Person '+other+' hears translation','ok');
-      // Set panel state
-      document.getElementById('person'+other).classList.add('speaking-out');
-      document.getElementById('dot'+other).className='sdot talk';
-      document.getElementById('sta'+other).textContent='Hearing…';
-      speakText(trans,st[other].lang.out,'default');
-      setTimeout(function(){
-        document.getElementById('person'+other).classList.remove('speaking-out');
-        document.getElementById('dot'+other).className='sdot';
-        document.getElementById('sta'+other).textContent='Idle';
-      },3000);
+      showSpeakBtn(other,trans,st[other].lang.out);
+      speakQueued(trans,st[other].lang.out);
     }
   };
   s.rec.onerror=function(e){
@@ -1086,8 +1078,8 @@ function startCallRec(){
       var trans=await doTranslate(final,callSt.lang.out,callSt.outLang.out);
       document.getElementById('callTrans').textContent=trans;
       addHist('Call',final,trans,callSt.outLang);
-      ss('🔊 Speaking translation'+(selectedDeviceId!=='default'?' via VB-Cable':'')+'…','ok');
-      speakText(trans,callSt.outLang.out,selectedDeviceId);
+      document.getElementById('callTrans').innerHTML=esc(trans)+'<br><button onclick="speakQueued('+JSON.stringify(trans)+',''+callSt.outLang.out+'')"+style="margin-top:8px;padding:6px 16px;border-radius:8px;border:1px solid #00c8ff;background:rgba(0,200,255,0.1);color:#00c8ff;font-size:12px;cursor:pointer;">🔊 Tap to Hear</button>';
+      speakQueued(trans,callSt.outLang.out);
     }
   };
   callSt.rec.onerror=function(e){
@@ -1190,6 +1182,52 @@ function clearAll(){
 //  UTILS
 // ═══════════════════════════════════════
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+
+// ═══════════════════════════════════════
+//  SPEAK QUEUE — bypasses Chrome autoplay block
+// ═══════════════════════════════════════
+var speakQueue = [];
+var isProcessingQueue = false;
+
+function speakQueued(text, langOut) {
+  speakQueue.push({text:text, langOut:langOut});
+  if (!isProcessingQueue) processQueue();
+}
+
+function processQueue() {
+  if (speakQueue.length === 0) { isProcessingQueue = false; return; }
+  isProcessingQueue = true;
+  var item = speakQueue.shift();
+  speakText(item.text, item.langOut, 'default');
+}
+
+// Show a tap-to-hear button in the speech box as fallback
+function showSpeakBtn(person, text, langOut) {
+  var box = document.getElementById('box' + person);
+  // Remove any existing speak button
+  var old = box.querySelector('.speak-btn');
+  if (old) old.remove();
+  // Create button
+  var btn = document.createElement('button');
+  btn.className = 'speak-btn';
+  btn.textContent = '🔊 Tap to Hear Translation';
+  btn.style.cssText = 'width:100%;margin-top:6px;padding:10px;border-radius:10px;' +
+    'border:1px solid #00c8ff;background:rgba(0,200,255,0.1);' +
+    'color:#00c8ff;font-size:13px;font-weight:600;cursor:pointer;' +
+    'letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;';
+  btn.onclick = function() {
+    btn.textContent = '🔊 Speaking…';
+    btn.style.background = 'rgba(0,255,157,0.1)';
+    btn.style.borderColor = '#00ff9d';
+    btn.style.color = '#00ff9d';
+    speakText(text, langOut, 'default');
+    setTimeout(function(){ btn.remove(); }, 4000);
+  };
+  box.appendChild(btn);
+  box.scrollTop = box.scrollHeight;
+  ss('✅ Translation ready — tap 🔊 button to hear it', 'ok');
+}
 
 // ═══════════════════════════════════════
 //  INIT
