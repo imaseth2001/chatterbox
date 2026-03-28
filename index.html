@@ -814,43 +814,109 @@ async function doTranslate(text,from,to){
 // ═══════════════════════════════════════
 //  SPEAK — with optional device routing
 // ═══════════════════════════════════════
-function speakText(text,langOut,deviceId){
-  if(!window.speechSynthesis||!text)return;
+// ── Audio unlock (Chrome blocks TTS until user interacts with an AudioContext)
+var audioUnlocked = false;
+function unlockAudio() {
+  if (audioUnlocked) return;
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var buf = ctx.createBuffer(1, 1, 22050);
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+    ctx.resume().then(function(){ audioUnlocked = true; ctx.close(); });
+  } catch(e) {}
+}
+// Unlock on first any touch/click on the page
+document.addEventListener('click', unlockAudio, { once: false });
+document.addEventListener('touchstart', unlockAudio, { once: false });
+
+function speakText(text, langOut, deviceId) {
+  if (!window.speechSynthesis || !text) return;
+
+  // Cancel any ongoing speech
   window.speechSynthesis.cancel();
-  isSpeaking=true;
-  var ttsLang=TTS[langOut]||langOut;
-  var vs=window.speechSynthesis.getVoices();
-  var voice=vs.find(function(v){return v.lang===ttsLang;})||
-             vs.find(function(v){return v.lang.startsWith(ttsLang.split('-')[0]);});
-  if(!voice){
-    isSpeaking=false;
-    ss('⚠️ No voice for this language installed on device — text shown','wrn');
-    return;
+  isSpeaking = true;
+
+  var ttsLang = TTS[langOut] || langOut;
+  var baseLang = ttsLang.split('-')[0];
+
+  function doSpeak() {
+    var vs = window.speechSynthesis.getVoices();
+
+    // Find best matching voice
+    var voice = vs.find(function(v){ return v.lang === ttsLang; }) ||
+                vs.find(function(v){ return v.lang.startsWith(baseLang); }) ||
+                vs.find(function(v){ return v.lang.startsWith('en'); }); // fallback to English
+
+    if (!voice || vs.length === 0) {
+      // Voices not loaded yet — retry after short delay
+      setTimeout(doSpeak, 250);
+      return;
+    }
+
+    var u = new SpeechSynthesisUtterance(text);
+    u.voice  = voice;
+    u.lang   = voice.lang;
+    u.rate   = 1;
+    u.pitch  = 1;
+    u.volume = 1;
+
+    u.onstart = function() {
+      isSpeaking = true;
+      ss('🔊 Speaking…', 'ok');
+    };
+    u.onend = function() {
+      isSpeaking = false;
+      ss('✅ Done', 'ok');
+    };
+    u.onerror = function(e) {
+      isSpeaking = false;
+      if (e.error === 'interrupted') return;
+      // On error, retry once after short delay
+      setTimeout(function(){
+        var u2 = new SpeechSynthesisUtterance(text);
+        u2.lang = ttsLang; u2.rate = 1; u2.volume = 1;
+        u2.onend = function(){ isSpeaking = false; };
+        u2.onerror = function(){ isSpeaking = false; };
+        window.speechSynthesis.speak(u2);
+      }, 300);
+    };
+
+    // Chrome TTS bug fix: cancel + tiny delay before speaking
+    window.speechSynthesis.cancel();
+    setTimeout(function(){
+      window.speechSynthesis.speak(u);
+    }, 100);
+
+    // VB-Cable: also route to selected device if setSinkId supported
+    if (deviceId && deviceId !== 'default' && 'setSinkId' in HTMLAudioElement.prototype) {
+      routeToDevice(text, ttsLang, deviceId);
+    }
   }
-  var u=new SpeechSynthesisUtterance(text);
-  u.voice=voice;u.lang=voice.lang;u.rate=1;u.pitch=1;
-  u.onend=u.onerror=function(){isSpeaking=false;};
-  // If AudioContext routing to VB-Cable is possible & device is VB-Cable
-  if(deviceId&&deviceId!=='default'&&window.AudioContext){
-    // Use AudioContext to route TTS through specific device
-    routeToDevice(text,voice,deviceId);
+
+  // If voices not loaded yet wait for them
+  var vs = window.speechSynthesis.getVoices();
+  if (vs && vs.length > 0) {
+    doSpeak();
   } else {
-    window.speechSynthesis.speak(u);
+    window.speechSynthesis.onvoiceschanged = function() { doSpeak(); };
+    // Also try after 500ms in case onvoiceschanged doesn't fire
+    setTimeout(doSpeak, 500);
   }
 }
 
-// Route audio to specific output device via AudioContext
-function routeToDevice(text,voice,deviceId){
-  // Create an audio element, speak via SpeechSynthesis, capture & redirect
-  // Best approach: use MediaStreamDestination + setSinkId on audio element
-  var u=new SpeechSynthesisUtterance(text);
-  u.voice=voice;u.lang=voice.lang;u.rate=1;u.pitch=1;
-  u.onend=function(){isSpeaking=false;};
-  u.onerror=function(){isSpeaking=false;};
-  window.speechSynthesis.speak(u);
-  // Also play through selected device via AudioContext if setSinkId is supported
-  // (Chrome supports setSinkId on HTMLAudioElement)
-  // We'll use a silent audio element to set the sink, then TTS plays through default + VB
+// Route audio to specific output device (VB-Cable)
+function routeToDevice(text, ttsLang, deviceId) {
+  try {
+    var audio = new Audio();
+    audio.setSinkId(deviceId).then(function() {
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = ttsLang; u.rate = 1; u.volume = 1;
+      window.speechSynthesis.speak(u);
+    }).catch(function(e){ console.warn('setSinkId failed:', e); });
+  } catch(e) { console.warn('VB-Cable routing error:', e); }
 }
 
 // ═══════════════════════════════════════
@@ -1129,6 +1195,13 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 //  INIT
 // ═══════════════════════════════════════
 (function(){
+  // Chrome TTS keepalive — prevents speechSynthesis from silently pausing
+  setInterval(function(){
+    if(window.speechSynthesis && !window.speechSynthesis.speaking){
+      window.speechSynthesis.resume();
+    }
+  }, 5000);
+
   if(window.speechSynthesis){
     window.speechSynthesis.getVoices();
     window.speechSynthesis.onvoiceschanged=function(){window.speechSynthesis.getVoices();};
