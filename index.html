@@ -815,159 +815,117 @@ async function doTranslate(text,from,to){
 //  SPEAK — with optional device routing
 // ═══════════════════════════════════════
 // ═══════════════════════════════════════
-//  SPEAK ENGINE — works reliably in Chrome
+//  SPEAK ENGINE — simple direct approach
 // ═══════════════════════════════════════
-
-// Global speak queue
 var spkQueue = [];
 var spkBusy  = false;
 
-// Called from user gesture OR after translate
 function queueSpeak(text, langOut) {
   if (!text || !text.trim()) return;
-  spkQueue.push({ text: text, langOut: langOut });
+  spkQueue.push({text:text, lang:langOut});
   if (!spkBusy) nextSpeak();
 }
 
 function nextSpeak() {
-  if (spkQueue.length === 0) { spkBusy = false; return; }
+  if (!spkQueue.length) { spkBusy = false; return; }
   spkBusy = true;
   var item = spkQueue.shift();
-  doSpeak(item.text, item.langOut);
+  doSpeak(item.text, item.lang);
 }
 
 function doSpeak(text, langOut) {
-  if (!text || !text.trim()) { spkBusy = false; return; }
-  var SS = window.speechSynthesis;
-  if (!SS) { spkBusy = false; return; }
+  if (!window.speechSynthesis || !text) { spkBusy=false; return; }
 
+  var SS = window.speechSynthesis;
   var ttsLang = TTS[langOut] || langOut;
 
-  // Cancel anything currently speaking
   SS.cancel();
 
-  function trySpeak(attempt) {
+  function speak() {
     var voices = SS.getVoices();
-    var v = voices.find(function(x){ return x.lang === ttsLang; }) ||
-            voices.find(function(x){ return x.lang.startsWith(ttsLang.split('-')[0]); }) ||
-            voices.find(function(x){ return x.lang.startsWith('en'); });
-
-    if (voices.length === 0 && attempt < 8) {
-      setTimeout(function(){ trySpeak(attempt+1); }, 250);
-      return;
-    }
+    var voice = voices.find(function(v){ return v.lang === ttsLang; }) ||
+                voices.find(function(v){ return v.lang.startsWith(ttsLang.split('-')[0]); }) ||
+                voices.find(function(v){ return v.lang.startsWith('en'); });
 
     var u = new SpeechSynthesisUtterance(text);
-    if (v) { u.voice = v; u.lang = v.lang; }
-    else   { u.lang = ttsLang; }
+    if (voice) { u.voice = voice; u.lang = voice.lang; }
+    else { u.lang = ttsLang; }
     u.rate = 0.95; u.pitch = 1; u.volume = 1;
 
-    var done = false;
-    function onDone() {
-      if (done) return; done = true;
-      spkBusy = false;
-      ss('✅ Done', 'ok');
-    }
-
-    u.onstart = function(){ ss('🔊 Speaking…','ok'); };
-    u.onend   = onDone;
-    u.onerror = function(e){
-      if (e.error === 'interrupted' || e.error === 'canceled') { onDone(); return; }
-      // Try MyMemory TTS audio fallback
-      ss('⚠️ Browser TTS failed — using audio fallback…','wrn');
-      playAudioFallback(text, ttsLang, onDone);
+    u.onstart = function() { ss('🔊 Speaking…', 'ok'); };
+    u.onend   = function() { ss('✅ Done','ok'); spkBusy=false; nextSpeak(); };
+    u.onerror = function(e) {
+      if (e.error==='interrupted'||e.error==='canceled') { spkBusy=false; nextSpeak(); return; }
+      ss('⚠️ Voice error: '+e.error,'wrn');
+      spkBusy=false; nextSpeak();
     };
 
-    SS.cancel();
-    setTimeout(function(){
-      try { SS.speak(u); } catch(err) {
-        playAudioFallback(text, ttsLang, onDone);
-      }
-    }, 80);
+    try { SS.speak(u); } catch(err) { spkBusy=false; nextSpeak(); }
   }
 
-  trySpeak(0);
-}
-
-// Audio fallback — Google Translate TTS (bypasses speechSynthesis entirely)
-function playAudioFallback(text, lang, onDone) {
-  try {
-    var baseLang = (lang || 'en').split('-')[0];
-    // Chunk text to max 200 chars (Google TTS limit)
-    var chunk = text.length > 200 ? text.substring(0, 200) : text;
-    // Use Google Translate TTS endpoint (free, no key needed)
-    var url = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' +
-      encodeURIComponent(chunk) +
-      '&tl=' + baseLang +
-      '&total=1&idx=0&textlen=' + chunk.length +
-      '&client=tw-ob';
-
-    var audio = new Audio();
-    audio.src = url;
-    audio.volume = 1.0;
-
-    audio.onended = function() {
-      ss('✅ Done', 'ok');
-      if (onDone) onDone();
-    };
-    audio.onerror = function() {
-      // Google TTS blocked — show message
-      ss('⚠️ Auto-voice blocked. See translated text above.', 'wrn');
-      if (onDone) onDone();
-    };
-    audio.oncanplaythrough = function() {
-      audio.play().catch(function() {
-        ss('⚠️ Audio blocked by browser. Tap 🔊 button.', 'wrn');
-        if (onDone) onDone();
-      });
-    };
-
-    ss('🔊 Loading audio…', 'ok');
-    audio.load();
-  } catch(e) {
-    ss('⚠️ Voice unavailable — text shown above', 'wrn');
-    if (onDone) onDone();
+  // If voices not loaded yet, wait
+  if (SS.getVoices().length > 0) {
+    speak();
+  } else {
+    SS.onvoiceschanged = function() { speak(); };
+    setTimeout(speak, 500);
   }
 }
 
-// Keep Chrome speechSynthesis alive (it silently pauses after ~15s)
-setInterval(function() {
+// Keepalive — Chrome pauses speechSynthesis silently
+setInterval(function(){
   if (window.speechSynthesis && !window.speechSynthesis.speaking) {
     window.speechSynthesis.resume();
   }
 }, 5000);
 
-// Speak button shown after translation (guaranteed user gesture)
+// Show tap-to-hear button (guaranteed fallback)
 function showSpeakBtn(person, text, langOut) {
-  var box = document.getElementById('box' + person);
+  var box = document.getElementById('box'+person);
   var old = box.querySelector('.speak-btn');
   if (old) old.remove();
-
   var btn = document.createElement('button');
   btn.className = 'speak-btn';
-  btn.innerHTML = '🔊 Tap to Hear';
-  btn.style.cssText = [
-    'display:block;width:100%;margin-top:6px;padding:11px 14px',
-    'border-radius:10px;border:1px solid #00c8ff',
-    'background:rgba(0,200,255,0.12);color:#00c8ff',
-    'font-size:13px;font-weight:700;cursor:pointer',
-    'letter-spacing:0.5px;-webkit-tap-highlight-color:transparent',
-    'transition:all 0.2s'
-  ].join(';');
-
-  btn.addEventListener('click', function() {
-    btn.innerHTML = '🔊 Speaking…';
-    btn.style.borderColor = '#00ff9d';
-    btn.style.color = '#00ff9d';
-    btn.style.background = 'rgba(0,255,157,0.1)';
-    // Direct user gesture — speak immediately
-    spkQueue = []; spkBusy = false;
+  btn.textContent = '🔊 Tap to Hear';
+  btn.style.cssText = 'display:block;width:100%;margin-top:6px;padding:11px;'+
+    'border-radius:10px;border:1px solid #00c8ff;'+
+    'background:rgba(0,200,255,0.12);color:#00c8ff;'+
+    'font-size:13px;font-weight:700;cursor:pointer;'+
+    '-webkit-tap-highlight-color:transparent;';
+  btn.addEventListener('click', function(){
+    btn.textContent = '🔊 Speaking…';
+    btn.style.borderColor='#00ff9d';btn.style.color='#00ff9d';
+    btn.style.background='rgba(0,255,157,0.1)';
+    window.speechSynthesis.cancel();
+    spkQueue=[]; spkBusy=false;
     doSpeak(text, langOut);
     setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 5000);
   });
-
   box.appendChild(btn);
   box.scrollTop = box.scrollHeight;
+  ss('✅ Translation ready — tap 🔊 to hear','ok');
+}
+
+function showCallSpeakBtn(text, langOut) {
+  var box = document.getElementById('callTrans');
+  var old = box.querySelector('.speak-btn');
+  if (old) old.remove();
+  var btn = document.createElement('button');
+  btn.className = 'speak-btn';
+  btn.textContent = '🔊 Tap to Hear';
+  btn.style.cssText = 'display:block;width:100%;margin-top:8px;padding:11px;'+
+    'border-radius:10px;border:1px solid #00c8ff;'+
+    'background:rgba(0,200,255,0.12);color:#00c8ff;'+
+    'font-size:13px;font-weight:700;cursor:pointer;'+
+    '-webkit-tap-highlight-color:transparent;';
+  btn.addEventListener('click', function(){
+    btn.textContent='🔊 Speaking…';
+    window.speechSynthesis.cancel();
+    spkQueue=[]; spkBusy=false;
+    doSpeak(text, langOut);
+    setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 5000);
+  });
+  box.appendChild(btn);
 }
 
 // ═══════════════════════════════════════
@@ -1033,7 +991,11 @@ function startRec(p){
       addBubble(p,trans,'trans');
       addHist(p,final,trans,st[other].lang);
       showSpeakBtn(other,trans,st[other].lang.out);
-      queueSpeak(trans,st[other].lang.out);
+      // Auto-click the speak button after tiny delay (triggers as user gesture)
+      setTimeout(function(){
+        var btn = document.querySelector('#box'+other+' .speak-btn');
+        if (btn) btn.click();
+      }, 300);
     }
   };
   s.rec.onerror=function(e){
@@ -1130,7 +1092,10 @@ function startCallRec(){
       addHist('Call',final,trans,callSt.outLang);
       document.getElementById('callTrans').textContent=trans;
       showCallSpeakBtn(trans,callSt.outLang.out);
-      queueSpeak(trans,callSt.outLang.out);
+      setTimeout(function(){
+        var btn = document.querySelector('#callTrans .speak-btn');
+        if (btn) btn.click();
+      }, 300);
     }
   };
   callSt.rec.onerror=function(e){
