@@ -136,6 +136,11 @@ header{
 .sdot{width:6px;height:6px;border-radius:50%;background:var(--muted);}
 .sdot.go{background:var(--green);box-shadow:0 0 6px var(--green);animation:bl 1s infinite;}
 .sdot.talk{background:var(--orange);box-shadow:0 0 6px var(--orange);animation:bl 0.7s infinite;}
+
+@keyframes pulse-btn {
+  0%,100%{ box-shadow:0 0 0 0 rgba(0,200,255,0.4); }
+  50%{ box-shadow:0 0 0 8px rgba(0,200,255,0); }
+}
 @keyframes bl{0%,100%{opacity:1}50%{opacity:0.2}}
 
 .speech-box{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:4px;}
@@ -819,6 +824,7 @@ async function doTranslate(text,from,to){
 // ═══════════════════════════════════════
 var spkQueue = [];
 var spkBusy  = false;
+var pendingSpeak = null; // stores last translation for user-gesture speak
 
 function queueSpeak(text, langOut) {
   if (!text || !text.trim()) return;
@@ -882,28 +888,39 @@ setInterval(function(){
 // Show tap-to-hear button (guaranteed fallback)
 function showSpeakBtn(person, text, langOut) {
   var box = document.getElementById('box'+person);
-  var old = box.querySelector('.speak-btn');
-  if (old) old.remove();
+  // Remove placeholder if present
+  var ph = box.querySelector('.ph');
+  if (ph) ph.remove();
+  // Remove old speak btn
+  var oldBtn = box.querySelector('.speak-btn');
+  if (oldBtn) oldBtn.remove();
+
   var btn = document.createElement('button');
   btn.className = 'speak-btn';
-  btn.textContent = '🔊 Tap to Hear';
-  btn.style.cssText = 'display:block;width:100%;margin-top:6px;padding:11px;'+
-    'border-radius:10px;border:1px solid #00c8ff;'+
-    'background:rgba(0,200,255,0.12);color:#00c8ff;'+
-    'font-size:13px;font-weight:700;cursor:pointer;'+
-    '-webkit-tap-highlight-color:transparent;';
+  btn.innerHTML = '🔊 TAP TO HEAR TRANSLATION';
+  btn.style.cssText = [
+    'display:block','width:100%','margin-top:8px','padding:14px',
+    'border-radius:12px','border:2px solid #00c8ff',
+    'background:rgba(0,200,255,0.15)','color:#00c8ff',
+    'font-size:14px','font-weight:700','cursor:pointer',
+    'letter-spacing:1px','-webkit-tap-highlight-color:transparent',
+    'animation:pulse-btn 1.5s ease-in-out infinite'
+  ].join(';');
+
   btn.addEventListener('click', function(){
-    btn.textContent = '🔊 Speaking…';
-    btn.style.borderColor='#00ff9d';btn.style.color='#00ff9d';
-    btn.style.background='rgba(0,255,157,0.1)';
+    btn.innerHTML = '🔊 Speaking…';
+    btn.style.borderColor='#00ff9d';
+    btn.style.color='#00ff9d';
+    btn.style.background='rgba(0,255,157,0.12)';
+    btn.style.animation='none';
     window.speechSynthesis.cancel();
     spkQueue=[]; spkBusy=false;
     doSpeak(text, langOut);
-    setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 5000);
+    setTimeout(function(){ if(btn.parentNode) btn.remove(); }, 6000);
   });
+
   box.appendChild(btn);
   box.scrollTop = box.scrollHeight;
-  ss('✅ Translation ready — tap 🔊 to hear','ok');
 }
 
 function showCallSpeakBtn(text, langOut) {
@@ -931,7 +948,20 @@ function showCallSpeakBtn(text, langOut) {
 // ═══════════════════════════════════════
 //  FACE-TO-FACE MIC
 // ═══════════════════════════════════════
-function toggleMic(p){if(st[p].listening)stopMic(p);else startMic(p);}
+function toggleMic(p){
+  // If there's a pending translation, speak it now (this IS a user gesture)
+  if (pendingSpeak && !st[p].listening) {
+    var ps = pendingSpeak;
+    pendingSpeak = null;
+    window.speechSynthesis.cancel();
+    spkQueue=[]; spkBusy=false;
+    doSpeak(ps.text, ps.lang);
+    // Remove speak buttons
+    document.querySelectorAll('.speak-btn').forEach(function(b){ b.remove(); });
+    return; // Don't start mic yet — let them hear translation first
+  }
+  if(st[p].listening) stopMic(p); else startMic(p);
+}
 
 async function startMic(p){
   if(!SR){ss('❌ Use Chrome or Edge browser','err');return;}
@@ -985,17 +1015,14 @@ function startRec(p){
     if(interim)showInterim(p,interim);
     if(final){
       clearInterim(p);
-      addBubble(p,final,'orig');
+      addBubble(p, final, 'orig');        // original → speaker's box
       ss('⏳ Translating…','');
-      var trans=await doTranslate(final,s.lang.out,st[other].lang.out);
-      addBubble(p,trans,'trans');
-      addHist(p,final,trans,st[other].lang);
-      showSpeakBtn(other,trans,st[other].lang.out);
-      // Auto-click the speak button after tiny delay (triggers as user gesture)
-      setTimeout(function(){
-        var btn = document.querySelector('#box'+other+' .speak-btn');
-        if (btn) btn.click();
-      }, 300);
+      var trans = await doTranslate(final, s.lang.out, st[other].lang.out);
+      addBubble(other, trans, 'trans');   // translation → OTHER person's box ✅
+      addHist(p, final, trans, st[other].lang);
+      pendingSpeak = {text: trans, lang: st[other].lang.out};
+      showSpeakBtn(other, trans, st[other].lang.out);
+      ss('✅ '+st[other].lang.name+' translation ready — tap 🔊 to hear', 'ok');
     }
   };
   s.rec.onerror=function(e){
@@ -1091,11 +1118,9 @@ function startCallRec(){
       document.getElementById('callTrans').textContent=trans;
       addHist('Call',final,trans,callSt.outLang);
       document.getElementById('callTrans').textContent=trans;
-      showCallSpeakBtn(trans,callSt.outLang.out);
-      setTimeout(function(){
-        var btn = document.querySelector('#callTrans .speak-btn');
-        if (btn) btn.click();
-      }, 300);
+      pendingSpeak = {text: trans, lang: callSt.outLang.out};
+      showCallSpeakBtn(trans, callSt.outLang.out);
+      ss('✅ Translation ready — tap 🔊 to hear', 'ok');
     }
   };
   callSt.rec.onerror=function(e){
