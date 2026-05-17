@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
-<meta name="theme-color" content="#07090f"/>
+<meta name="theme-color" content="#07090f"/>hh
 <meta name="description" content="Chatterbox – Real-time two-way voice translator for face-to-face and phone calls. 50+ languages."/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -1020,9 +1020,8 @@ function startRec(p){
       var trans = await doTranslate(final, s.lang.out, st[other].lang.out);
       addBubble(other, trans, 'trans');   // translation → OTHER person's box ✅
       addHist(p, final, trans, st[other].lang);
-      pendingSpeak = {text: trans, lang: st[other].lang.out};
+      queueSpeak(trans, st[other].lang.out);
       showSpeakBtn(other, trans, st[other].lang.out);
-      ss('✅ '+st[other].lang.name+' translation ready — tap 🔊 to hear', 'ok');
     }
   };
   s.rec.onerror=function(e){
@@ -1118,9 +1117,8 @@ function startCallRec(){
       document.getElementById('callTrans').textContent=trans;
       addHist('Call',final,trans,callSt.outLang);
       document.getElementById('callTrans').textContent=trans;
-      pendingSpeak = {text: trans, lang: callSt.outLang.out};
+      queueSpeak(trans, callSt.outLang.out);
       showCallSpeakBtn(trans, callSt.outLang.out);
-      ss('✅ Translation ready — tap 🔊 to hear', 'ok');
     }
   };
   callSt.rec.onerror=function(e){
